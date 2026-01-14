@@ -1,6 +1,5 @@
 import "dotenv/config";
 import fs from "fs";
-import net from "net";
 import os from "os";
 import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 
@@ -8,55 +7,30 @@ import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 const {
   DISCORD_TOKEN,
   CHANNEL_ID,
-  SERVER_PORT,
-  CPU_WARN,
-  RAM_WARN,
+  LOG_FILE_PATH, // Ruta al archivo que el servidor actualiza (ej: "server.log")
   CHECK_INTERVAL,
 } = process.env;
 
 const STATE_FILE = "./state.json";
-const SERVER_HOST = "127.0.0.1"; // Al estar en la misma máquina, usamos localhost
-
-/* ================= GESTIÓN DE ESTADO ================= */
-function loadState() {
-  if (!fs.existsSync(STATE_FILE)) return { messageId: null, lastStatus: null };
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return { messageId: null, lastStatus: null };
-  }
-}
-
-function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
 
 /* ================= LÓGICA DE MONITOREO ================= */
 
-// Verifica si el puerto está abierto
-function checkPort(port, timeout = 5000) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    socket.setTimeout(timeout);
+function checkServerByLog(path) {
+  try {
+    if (!fs.existsSync(path)) return false;
 
-    socket
-      .once("connect", () => {
-        socket.destroy();
-        resolve(true);
-      })
-      .once("timeout", () => {
-        socket.destroy();
-        resolve(false);
-      })
-      .once("error", () => {
-        socket.destroy();
-        resolve(false);
-      })
-      .connect(Number(port), SERVER_HOST);
-  });
+    const stats = fs.statSync(path);
+    const now = new Date().getTime();
+    const lastUpdate = stats.mtime.getTime();
+    
+    // Si el archivo se actualizó hace menos de 2 minutos, el servidor está vivo
+    const diffSeconds = (now - lastUpdate) / 1000;
+    return diffSeconds < 120; 
+  } catch (err) {
+    return false;
+  }
 }
 
-// Obtiene estadísticas del sistema
 function getSystemStats() {
   const cpus = os.cpus();
   let idle = 0, total = 0;
@@ -64,9 +38,10 @@ function getSystemStats() {
     for (let type in cpu.times) total += cpu.times[type];
     idle += cpu.times.idle;
   });
-  const cpuUsage = Math.round(100 - (idle / total) * 100);
-  const ramUsage = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
-  return { cpuUsage, ramUsage };
+  return {
+    cpuUsage: Math.round(100 - (idle / total) * 100),
+    ramUsage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100)
+  };
 }
 
 /* ================= BOT DE DISCORD ================= */
@@ -74,81 +49,44 @@ function getSystemStats() {
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 async function updateStatus(channel) {
-  const state = loadState();
-  const isOnline = await checkPort(SERVER_PORT);
+  const isOnline = checkServerByLog(LOG_FILE_PATH);
   const { cpuUsage, ramUsage } = getSystemStats();
+  const state = JSON.parse(fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : '{"messageId":null}');
 
-  let status = "DOWN", color = 0xff0000, emoji = "🔴";
-  
-  if (isOnline) {
-    if (cpuUsage >= Number(CPU_WARN) || ramUsage >= Number(RAM_WARN)) {
-      status = "WARN";
-      color = 0xffff00; // Amarillo
-      emoji = "🟡";
-    } else {
-      status = "OK";
-      color = 0x00ff00; // Verde
-      emoji = "🟢";
-    }
-  }
-
-  // Crear el Embed (la tarjeta visual)
   const embed = new EmbedBuilder()
-    .setTitle(`${emoji} Estado del Servidor`)
-    .setColor(color)
+    .setTitle(isOnline ? "🟢 Servidor Activo" : "🔴 Servidor Caído")
+    .setColor(isOnline ? 0x00FF00 : 0xFF0000)
     .addFields(
-      { name: "Estatus", value: status === "OK" ? "En línea" : status === "WARN" ? "Rendimiento Crítico" : "Desconectado", inline: true },
-      { name: "CPU", value: `${cpuUsage}%`, inline: true },
-      { name: "RAM", value: `${ramUsage}%`, inline: true }
+      { name: "Última actividad", value: isOnline ? "Reciente" : "Hace más de 2 min", inline: true },
+      { name: "Carga CPU", value: `${cpuUsage}%`, inline: true },
+      { name: "Uso RAM", value: `${ramUsage}%`, inline: true }
     )
-    .setTimestamp()
-    .setFooter({ text: `Puerto monitoreado: ${SERVER_PORT}` });
-
-  let messageId = state.messageId;
+    .setTimestamp();
 
   try {
-    if (messageId) {
-      const msg = await channel.messages.fetch(messageId);
-      await msg.edit({ content: null, embeds: [embed] });
+    let msg;
+    if (state.messageId) {
+      msg = await channel.messages.fetch(state.messageId);
+      await msg.edit({ embeds: [embed] });
     } else {
-      const msg = await channel.send({ embeds: [embed] });
-      messageId = msg.id;
+      msg = await channel.send({ embeds: [embed] });
+      state.messageId = msg.id;
+      fs.writeFileSync(STATE_FILE, JSON.stringify(state));
     }
-  } catch (err) {
-    // Si el mensaje no existe o fue borrado, enviamos uno nuevo
+  } catch {
     const msg = await channel.send({ embeds: [embed] });
-    messageId = msg.id;
+    state.messageId = msg.id;
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state));
   }
-
-  // Notificación extra (ping) solo si el estado cambió a algo malo
-  if (status !== state.lastStatus && (status === "DOWN" || status === "WARN")) {
-    const alert = await channel.send(`⚠️ **Atención:** El servidor ha cambiado a estado: **${status}** @everyone`);
-    setTimeout(() => alert.delete().catch(() => {}), 15000); // Borrar alerta en 15s
-  }
-
-  saveState({ messageId, lastStatus: status });
-  console.log(`[${new Date().toLocaleTimeString()}] Chequeo finalizado: ${status}`);
 }
 
-/* ================= INICIO ================= */
+/* ================= START ================= */
 
 client.once("ready", async () => {
-  console.log(`✅ Bot activo: ${client.user.tag}`);
+  console.log(`🤖 Bot listo. Monitoreando archivo: ${LOG_FILE_PATH}`);
+  const channel = await client.channels.fetch(CHANNEL_ID);
   
-  try {
-    const channel = await client.channels.fetch(CHANNEL_ID);
-    
-    // Ejecutar inmediatamente al prender
-    await updateStatus(channel);
-
-    // Ciclo de repetición
-    setInterval(() => {
-      updateStatus(channel).catch(console.error);
-    }, Number(CHECK_INTERVAL) || 60000);
-
-  } catch (error) {
-    console.error("Error crítico al obtener el canal:", error.message);
-  }
+  setInterval(() => updateStatus(channel), Number(CHECK_INTERVAL) || 30000);
 });
 
 client.login(DISCORD_TOKEN);
