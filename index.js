@@ -24,7 +24,11 @@ function loadState() {
   if (!fs.existsSync(STATE_FILE)) {
     return { messageId: null, lastStatus: null };
   }
-  return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch (err) {
+    return { messageId: null, lastStatus: null };
+  }
 }
 
 function saveState(state) {
@@ -33,9 +37,14 @@ function saveState(state) {
 
 /* ================= CHECKS ================= */
 
-function checkPort(host, port, timeout = 3000) {
+/**
+ * Intenta abrir una conexión TCP al host y puerto especificados.
+ * Se aumenta el timeout y se añade limpieza de socket.
+ */
+function checkPort(host, port, timeout = 5000) {
   return new Promise((resolve) => {
     const socket = new net.Socket();
+
     socket.setTimeout(timeout);
 
     socket
@@ -45,10 +54,15 @@ function checkPort(host, port, timeout = 3000) {
       })
       .once("timeout", () => {
         socket.destroy();
+        console.log(`[LOG] Timeout intentando conectar a ${host}:${port}`);
         resolve(false);
       })
-      .once("error", () => resolve(false))
-      .connect(port, host);
+      .once("error", (err) => {
+        socket.destroy();
+        console.log(`[LOG] Error de conexión en ${host}:${port} -> ${err.message}`);
+        resolve(false);
+      })
+      .connect(Number(port), host);
   });
 }
 
@@ -83,8 +97,8 @@ async function updateStatusMessage(channel, text, state) {
       const msg = await channel.messages.fetch(state.messageId);
       await msg.edit(text);
       return state.messageId;
-    } catch {
-      // mensaje borrado o sin permisos
+    } catch (e) {
+      console.log("[LOG] No se pudo editar el mensaje anterior, enviando uno nuevo.");
     }
   }
 
@@ -93,49 +107,51 @@ async function updateStatusMessage(channel, text, state) {
 }
 
 async function sendPing(channel, text) {
-  const msg = await channel.send({
-    content: `@everyone ${text}`,
-    allowedMentions: { parse: ["everyone"] },
-  });
+  try {
+    const msg = await channel.send({
+      content: `@everyone ⚠️ **Alerta de Estado:** ${text}`,
+      allowedMentions: { parse: ["everyone"] },
+    });
 
-  // borrar el ping luego de 15s
-  setTimeout(() => msg.delete().catch(() => {}), 15000);
+    // Borrar el ping luego de 15s para no ensuciar el canal
+    setTimeout(() => msg.delete().catch(() => {}), 15000);
+  } catch (err) {
+    console.error("[ERROR] No se pudo enviar el ping:", err.message);
+  }
 }
 
 /* ================= STATUS LOGIC ================= */
 
 async function checkStatus(channel) {
   const state = loadState();
-  const online = await checkPort(SERVER_HOST, Number(SERVER_PORT));
+  const online = await checkPort(SERVER_HOST, SERVER_PORT);
 
   let status;
   let text;
 
   if (!online) {
     status = "DOWN";
-    text = "Actualmente Caído - 🔴";
+    text = "🔴 **Estado:** Actualmente Caído o Inalcanzable";
   } else {
     const cpu = getCpuUsage();
     const ram = getRamUsage();
 
     if (cpu >= Number(CPU_WARN) || ram >= Number(RAM_WARN)) {
       status = "WARN";
-      text = "Actualmente con problemas de rendimiento - 🟡";
+      text = `🟡 **Estado:** Problemas de rendimiento (CPU: ${cpu}% | RAM: ${ram}%)`;
     } else {
       status = "OK";
-      text = "Funcionando correctamente - 🟢";
+      text = `🟢 **Estado:** Funcionando correctamente (CPU: ${cpu}% | RAM: ${ram}%)`;
     }
   }
 
-  console.log(
-    `[CHECK] ${new Date().toLocaleTimeString()} | ${status}`
-  );
+  console.log(`[CHECK] ${new Date().toLocaleTimeString()} | ${status}`);
 
-  // 🔥 SE EDITA SIEMPRE
+  // Actualizar el mensaje principal
   const messageId = await updateStatusMessage(channel, text, state);
 
-  // 🔔 PING SOLO SI CAMBIÓ A WARN O DOWN
-  if (status !== state.lastStatus && state.lastStatus !== null) {
+  // Enviar ping si el estado cambió a algo crítico (DOWN o WARN)
+  if (status !== state.lastStatus) {
     if (status === "DOWN" || status === "WARN") {
       await sendPing(channel, text);
     }
@@ -149,18 +165,25 @@ async function checkStatus(channel) {
 
 /* ================= START ================= */
 
-client.once("clientReady", async () => {
+// El evento correcto es 'ready'
+client.once("ready", async () => {
   console.log(`🤖 Bot conectado como ${client.user.tag}`);
 
-  const channel = await client.channels.fetch(CHANNEL_ID);
+  try {
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    
+    // Ejecutar chequeo inicial
+    await checkStatus(channel);
 
-  // primer chequeo
-  await checkStatus(channel);
+    // Configurar intervalo
+    const interval = Number(CHECK_INTERVAL) || 30000;
+    setInterval(() => {
+      checkStatus(channel).catch(console.error);
+    }, interval);
 
-  // interval fijo
-  setInterval(() => {
-    checkStatus(channel).catch(console.error);
-  }, Number(CHECK_INTERVAL));
+  } catch (error) {
+    console.error("[CRITICAL ERROR] Error al obtener el canal:", error.message);
+  }
 });
 
 client.login(DISCORD_TOKEN);
