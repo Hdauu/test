@@ -216,6 +216,7 @@ client.once("ready", async () => {
     console.log(`🔄 Intervalo: ${Number(CHECK_INTERVAL) / 1000} segundos\n`);
     
     // Ejecución inicial e intervalo
+    
     updateStatus();
     setInterval(() => updateStatus(), Number(CHECK_INTERVAL));
 });
