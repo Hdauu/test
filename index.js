@@ -1,32 +1,20 @@
 import "dotenv/config";
 import fs from "fs";
 import os from "os";
+import { exec } from "child_process"; 
 import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 
-/* ================= CONFIGURACIÓN ================= */
-const {
-  DISCORD_TOKEN,
-  CHANNEL_ID,
-  CHECK_INTERVAL,
-} = process.env;
-
+const { DISCORD_TOKEN, CHANNEL_ID, PROCESS_NAME, CHECK_INTERVAL } = process.env;
 const STATE_FILE = "./state.json";
 
-/* ================= GESTIÓN DE ESTADO ================= */
-function loadState() {
-  if (!fs.existsSync(STATE_FILE)) return { messageId: null };
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch (err) {
-    return { messageId: null };
-  }
-}
+// Umbrales para pruebas
+const CPU_LIMIT = 80;
+const RAM_LIMIT = 85;
 
-function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-/* ================= RECURSOS DEL SISTEMA ================= */
+/* ================= LÓGICA DE MONITOREO ================= */
+
 function getSystemStats() {
   const cpus = os.cpus();
   let idle = 0, total = 0;
@@ -34,83 +22,96 @@ function getSystemStats() {
     for (let type in cpu.times) total += cpu.times[type];
     idle += cpu.times.idle;
   });
-  const cpuUsage = Math.round(100 - (idle / total) * 100);
-  const ramUsage = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
-  
-  const uptimeH = Math.floor(os.uptime() / 3600);
-  const uptimeM = Math.floor((os.uptime() % 3600) / 60);
-
-  return { cpuUsage, ramUsage, uptime: `${uptimeH}h ${uptimeM}m` };
+  return {
+    cpuUsage: Math.round(100 - (idle / total) * 100),
+    ramUsage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100)
+  };
 }
 
-/* ================= BOT DE DISCORD ================= */
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
+// Busca si el proceso del servidor existe en el sistema
+function isServerRunning(name) {
+  return new Promise((resolve) => {
+    if (!name) return resolve(true);
+    const cmd = os.platform() === 'win32' ? `tasklist` : `ps aux`;
+    exec(cmd, (err, stdout) => {
+      resolve(stdout.toLowerCase().includes(name.toLowerCase()));
+    });
+  });
+}
 
-async function updateStatus(channel) {
-  const stats = getSystemStats();
-  const state = loadState();
+async function updateStatus(channel, forceStatus = null) {
+  if (!channel) return;
+  const state = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE)) : { messageId: null };
+  
+  const serverAlive = forceStatus ? false : await isServerRunning(PROCESS_NAME);
+  const { cpuUsage, ramUsage } = getSystemStats();
 
-  // ELIMINADA TODA LÓGICA DE PUERTOS. 
-  // Si el bot llega aquí, el estado es ONLINE por defecto.
+  let statusText = "🟢 EN LÍNEA";
+  let color = 0x00FF00;
+
+  if (forceStatus === "SHUTDOWN" || !serverAlive) {
+    statusText = "🔴 SERVIDOR CAÍDO / APAGADO";
+    color = 0xFF0000;
+  } else if (cpuUsage > CPU_LIMIT || ramUsage > RAM_LIMIT) {
+    statusText = "🟡 CARGA ALTA";
+    color = 0xFFFF00;
+  }
+
   const embed = new EmbedBuilder()
-    .setTitle("🟢 Servidor: Funcionando")
-    .setColor(0x00FF00)
-    .setDescription("El sistema de monitoreo está reportando actividad directamente desde el servidor local.")
+    .setTitle("Monitor de Sistema")
+    .setColor(color)
+    .setDescription(`Estado actual: **${statusText}**`)
     .addFields(
-      { name: "Estado", value: "✅ En Línea", inline: true },
-      { name: "Uptime", value: stats.uptime, inline: true },
-      { name: "\u200B", value: "\u200B", inline: true },
-      { name: "Carga CPU", value: `${stats.cpuUsage}%`, inline: true },
-      { name: "Uso de RAM", value: `${stats.ramUsage}%`, inline: true }
+      { name: "CPU", value: `${cpuUsage}%`, inline: true },
+      { name: "RAM", value: `${ramUsage}%`, inline: true },
+      { name: "Proceso", value: PROCESS_NAME || "Sistema Global", inline: true }
     )
-    .setTimestamp()
-    .setFooter({ text: "Actualización en tiempo real" });
+    .setTimestamp();
 
   try {
-    let messageId = state.messageId;
-
-    if (messageId) {
-      try {
-        const msg = await channel.messages.fetch(messageId);
-        await msg.edit({ embeds: [embed] });
-      } catch (e) {
-        const msg = await channel.send({ embeds: [embed] });
-        messageId = msg.id;
-      }
+    let msg;
+    if (state.messageId) {
+      msg = await channel.messages.fetch(state.messageId);
+      await msg.edit({ embeds: [embed] });
     } else {
-      const msg = await channel.send({ embeds: [embed] });
-      messageId = msg.id;
+      msg = await channel.send({ embeds: [embed] });
+      state.messageId = msg.id;
+      fs.writeFileSync(STATE_FILE, JSON.stringify(state));
     }
-
-    saveState({ messageId });
-    console.log(`[${new Date().toLocaleTimeString()}] Panel actualizado correctamente.`);
-  } catch (error) {
-    console.error("Error al actualizar Discord:", error.message);
+    
+    // Alerta por caída detectada mientras el bot vive
+    if (!serverAlive && forceStatus !== "SHUTDOWN") {
+       const alert = await channel.send(`🚨 **¡Alerta!** El proceso \`${PROCESS_NAME}\` no responde. @everyone`);
+       setTimeout(() => alert.delete().catch(() => {}), 10000);
+    }
+  } catch (e) {
+    const msg = await channel.send({ embeds: [embed] });
+    state.messageId = msg.id;
+    fs.writeFileSync(STATE_FILE, JSON.stringify(state));
   }
 }
+
+/* ================= EVENTOS DE CIERRE ================= */
+
+// Si cierras el bot, intentará poner el mensaje en rojo antes de salir
+const handleShutdown = async () => {
+  console.log("Cerrando bot... notificando a Discord.");
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  await updateStatus(channel, "SHUTDOWN");
+  process.exit();
+};
+
+process.on("SIGINT", handleShutdown);
+process.on("SIGTERM", handleShutdown);
 
 /* ================= INICIO ================= */
 
-// Cambiado a 'clientReady' para eliminar el DeprecationWarning de tu consola
 client.once("clientReady", async () => {
-  console.log(`✅ Bot conectado como ${client.user.tag}`);
-
-  try {
-    const channel = await client.channels.fetch(CHANNEL_ID);
-    
-    // Ejecución inicial
-    await updateStatus(channel);
-
-    // Bucle de actualización (30 segundos por defecto)
-    setInterval(() => {
-      updateStatus(channel).catch(console.error);
-    }, Number(CHECK_INTERVAL) || 30000);
-
-  } catch (error) {
-    console.error("Error crítico: No se pudo conectar al canal.", error.message);
-  }
+  console.log(`✅ Monitor iniciado como ${client.user.tag}`);
+  const channel = await client.channels.fetch(CHANNEL_ID);
+  
+  setInterval(() => updateStatus(channel), Number(CHECK_INTERVAL) || 30000);
+  updateStatus(channel);
 });
 
 client.login(DISCORD_TOKEN);
