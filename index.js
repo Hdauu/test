@@ -8,7 +8,7 @@ const { DISCORD_TOKEN, CHANNEL_ID, PROCESS_NAME, CHECK_INTERVAL } = process.env;
 const STATE_FILE = "./state.json";
 
 // Umbrales configurables
-const CPU_LIMIT = 80;
+const CPU_LIMIT = 5;
 const RAM_LIMIT = 85;
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
