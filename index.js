@@ -4,12 +4,16 @@ import os from "os";
 import { exec } from "child_process";
 import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 
-const { DISCORD_TOKEN, CHANNEL_ID, PROCESS_NAME, CHECK_INTERVAL } = process.env;
-const STATE_FILE = "./state.json";
+const { 
+    DISCORD_TOKEN, 
+    CHANNEL_ID, 
+    CPU_WARN = 80, 
+    RAM_WARN = 85,
+    CHECK_INTERVAL = 15000 
+} = process.env;
 
-// Umbrales configurables
-const CPU_LIMIT = 5;
-const RAM_LIMIT = 85;
+const STATE_FILE = "./state.json";
+const MAINTENANCE_FILE = "./maintenance.flag";
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
@@ -24,22 +28,30 @@ function getSystemStats() {
     });
     return {
         cpuUsage: Math.round(100 - (idle / total) * 100),
-        ramUsage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100)
+        ramUsage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100),
+        totalRam: (os.totalmem() / (1024 ** 3)).toFixed(1),
+        freeRam: (os.freemem() / (1024 ** 3)).toFixed(1)
     };
 }
 
 /**
- * Busca el proceso. Si no hay PROCESS_NAME, monitorea la máquina globalmente.
+ * Verifica si el servidor Hytale está corriendo
  */
-function isServerRunning(name) {
+function isHytaleRunning() {
     return new Promise((resolve) => {
-        if (!name) return resolve(true); 
-        const cmd = os.platform() === 'win32' ? `tasklist` : `ps ax`;
+        // Busca procesos Java relacionados con Hytale
+        const cmd = `ps aux | grep -i "java.*hytale" | grep -v grep`;
         exec(cmd, (err, stdout) => {
-            if (err) return resolve(false);
-            resolve(stdout.toLowerCase().includes(name.toLowerCase()));
+            resolve(stdout.trim().length > 0);
         });
     });
+}
+
+/**
+ * Verifica si existe el archivo de mantenimiento
+ */
+function isInMaintenance() {
+    return fs.existsSync(MAINTENANCE_FILE);
 }
 
 /* ================= LÓGICA PRINCIPAL ================= */
@@ -49,36 +61,90 @@ async function updateStatus(isShuttingDown = false) {
         const channel = await client.channels.fetch(CHANNEL_ID);
         if (!channel) return;
 
-        const state = fs.existsSync(STATE_FILE) ? JSON.parse(fs.readFileSync(STATE_FILE)) : { messageId: null, lastStatus: null };
-        const serverAlive = isShuttingDown ? false : await isServerRunning(PROCESS_NAME);
-        const { cpuUsage, ramUsage } = getSystemStats();
+        const state = fs.existsSync(STATE_FILE) 
+            ? JSON.parse(fs.readFileSync(STATE_FILE)) 
+            : { messageId: null, lastStatus: null };
+
+        const serverAlive = isShuttingDown ? false : await isHytaleRunning();
+        const inMaintenance = isInMaintenance();
+        const { cpuUsage, ramUsage, totalRam, freeRam } = getSystemStats();
 
         // Determinar Estado y Color
-        let statusText = "🟢 FUNCIONANDO";
-        let color = 0x2ECC71; // Esmeralda
+        let statusText = "";
+        let statusEmoji = "";
+        let color = 0x2ECC71;
         let currentStatus = "OK";
+        let description = "";
 
-        if (isShuttingDown || !serverAlive) {
-            statusText = "🔴 SERVIDOR APAGADO / CAÍDO";
-            color = 0xE74C3C; // Alizarina (Rojo)
+        if (inMaintenance) {
+            // 🔧 MANTENIMIENTO
+            statusText = "MANTENIMIENTO PROGRAMADO";
+            statusEmoji = "🔧";
+            color = 0x3498DB; // Azul
+            currentStatus = "MAINTENANCE";
+            description = "El servidor está en modo mantenimiento. Volverá pronto.";
+        } else if (isShuttingDown || !serverAlive) {
+            // 🔴 CAÍDO
+            statusText = "SERVIDOR CAÍDO";
+            statusEmoji = "🔴";
+            color = 0xE74C3C; // Rojo
             currentStatus = "DOWN";
-        } else if (cpuUsage > CPU_LIMIT || ramUsage > RAM_LIMIT) {
-            statusText = "🟡 CARGA CRÍTICA";
-            color = 0xF1C40F; // Girasol (Amarillo)
+            description = "El proceso de Hytale no está activo. Verifica los logs del servidor.";
+        } else if (cpuUsage > Number(CPU_WARN) || ramUsage > Number(RAM_WARN)) {
+            // 🟡 PROBLEMAS DE RENDIMIENTO
+            statusText = "PROBLEMAS DE RENDIMIENTO";
+            statusEmoji = "🟡";
+            color = 0xF39C12; // Naranja
             currentStatus = "WARN";
+            
+            const issues = [];
+            if (cpuUsage > Number(CPU_WARN)) issues.push(`CPU alta (${cpuUsage}%)`);
+            if (ramUsage > Number(RAM_WARN)) issues.push(`RAM alta (${ramUsage}%)`);
+            description = `⚠️ **Advertencias detectadas:**\n${issues.join('\n')}`;
+        } else {
+            // 🟢 FUNCIONANDO CORRECTAMENTE
+            statusText = "FUNCIONANDO CORRECTAMENTE";
+            statusEmoji = "🟢";
+            color = 0x2ECC71; // Verde
+            currentStatus = "OK";
+            description = "Todos los sistemas operando dentro de parámetros normales.";
         }
 
         const embed = new EmbedBuilder()
-            .setTitle("📊 Monitor de Infraestructura")
+            .setTitle(`${statusEmoji} Estado del Servidor Hytale`)
+            .setDescription(description)
             .setColor(color)
-            .setThumbnail(client.user.displayAvatarURL())
             .addFields(
-                { name: "Estado del Servicio", value: `**${statusText}**`, inline: false },
-                { name: "🖥️ CPU", value: `${cpuUsage}%`, inline: true },
-                { name: "💾 RAM", value: `${ramUsage}%`, inline: true },
-                { name: "⏱️ Última Sincronización", value: `<t:${Math.floor(Date.now() / 1000)}:R>`, inline: true }
+                { 
+                    name: "📊 Estado", 
+                    value: `**${statusText}**`, 
+                    inline: false 
+                },
+                { 
+                    name: "🖥️ CPU", 
+                    value: `${cpuUsage}%${cpuUsage > Number(CPU_WARN) ? ' ⚠️' : ''}`, 
+                    inline: true 
+                },
+                { 
+                    name: "💾 RAM", 
+                    value: `${ramUsage}% (${freeRam}GB libre de ${totalRam}GB)${ramUsage > Number(RAM_WARN) ? ' ⚠️' : ''}`, 
+                    inline: true 
+                },
+                { 
+                    name: "🎮 Proceso Hytale", 
+                    value: serverAlive ? "✅ Activo" : "❌ Inactivo", 
+                    inline: true 
+                },
+                { 
+                    name: "⏱️ Última Actualización", 
+                    value: `<t:${Math.floor(Date.now() / 1000)}:R>`, 
+                    inline: false 
+                }
             )
-            .setFooter({ text: `Vigilando proceso: ${PROCESS_NAME || "Sistema Completo"}` });
+            .setFooter({ 
+                text: `Intervalo de verificación: ${Number(CHECK_INTERVAL) / 1000}s | Ubuntu Server 24` 
+            })
+            .setTimestamp();
 
         let msg;
         if (state.messageId) {
@@ -94,27 +160,48 @@ async function updateStatus(isShuttingDown = false) {
 
         // Guardar ID y Estado
         state.messageId = msg.id;
+        const previousStatus = state.lastStatus;
         state.lastStatus = currentStatus;
         fs.writeFileSync(STATE_FILE, JSON.stringify(state));
 
-        // Alerta por cambio de estado a DOWN (Solo si el bot sigue vivo)
-        if (currentStatus === "DOWN" && !isShuttingDown) {
-            const alert = await channel.send(`🚨 **ATENCIÓN:** Se ha detectado una caída en \`${PROCESS_NAME}\`. @everyone`);
-            setTimeout(() => alert.delete().catch(() => {}), 30000);
+        // Alertas por cambio de estado
+        if (previousStatus && previousStatus !== currentStatus && !isShuttingDown) {
+            let alertMessage = "";
+            
+            if (currentStatus === "DOWN") {
+                alertMessage = `🚨 **ALERTA CRÍTICA:** El servidor Hytale se ha caído. <@&YOUR_ADMIN_ROLE_ID>`;
+            } else if (currentStatus === "WARN" && previousStatus === "OK") {
+                alertMessage = `⚠️ **Advertencia:** Detectados problemas de rendimiento en el servidor.`;
+            } else if (currentStatus === "OK" && previousStatus !== "MAINTENANCE") {
+                alertMessage = `✅ **Restaurado:** El servidor ha vuelto a la normalidad.`;
+            } else if (currentStatus === "MAINTENANCE") {
+                alertMessage = `🔧 **Información:** El servidor ha entrado en modo mantenimiento.`;
+            }
+
+            if (alertMessage) {
+                const alert = await channel.send(alertMessage);
+                setTimeout(() => alert.delete().catch(() => {}), 60000);
+            }
         }
 
     } catch (error) {
-        console.error("Error en el ciclo de monitoreo:", error);
+        console.error("❌ Error en el ciclo de monitoreo:", error);
     }
 }
 
+/* ================= COMANDOS MANUALES ================= */
+
+/**
+ * Para activar mantenimiento: touch maintenance.flag
+ * Para desactivar: rm maintenance.flag
+ */
+
 /* ================= GESTIÓN DE SALIDA ================= */
 
-// Esto intenta marcar el bot como DOWN si cierras el proceso (Ctrl+C o Kill)
 const shutdown = async () => {
     console.log("\n🛑 Recibida señal de apagado. Actualizando estado final...");
     await updateStatus(true);
-    process.exit(0);
+    setTimeout(() => process.exit(0), 1000);
 };
 
 process.on("SIGINT", shutdown);
@@ -122,12 +209,15 @@ process.on("SIGTERM", shutdown);
 
 /* ================= INICIO ================= */
 
-client.once("clientReady", async () => {
+client.once("ready", async () => {
     console.log(`✅ Bot conectado como ${client.user.tag}`);
+    console.log(`📡 Monitoreando canal: ${CHANNEL_ID}`);
+    console.log(`⚙️  CPU límite: ${CPU_WARN}% | RAM límite: ${RAM_WARN}%`);
+    console.log(`🔄 Intervalo: ${Number(CHECK_INTERVAL) / 1000} segundos\n`);
     
     // Ejecución inicial e intervalo
     updateStatus();
-    setInterval(() => updateStatus(), Number(CHECK_INTERVAL) || 30000);
+    setInterval(() => updateStatus(), Number(CHECK_INTERVAL));
 });
 
 client.login(DISCORD_TOKEN);
