@@ -7,40 +7,46 @@ import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 const {
   DISCORD_TOKEN,
   CHANNEL_ID,
-  LOG_FILE_PATH, // Ruta al archivo que el servidor actualiza (ej: "server.log")
   CHECK_INTERVAL,
 } = process.env;
 
 const STATE_FILE = "./state.json";
 
-/* ================= LÓGICA DE MONITOREO ================= */
+/* ================= FUNCIONES DE APOYO ================= */
 
-function checkServerByLog(path) {
+function loadState() {
+  if (!fs.existsSync(STATE_FILE)) return { messageId: null };
   try {
-    if (!fs.existsSync(path)) return false;
-
-    const stats = fs.statSync(path);
-    const now = new Date().getTime();
-    const lastUpdate = stats.mtime.getTime();
-    
-    // Si el archivo se actualizó hace menos de 2 minutos, el servidor está vivo
-    const diffSeconds = (now - lastUpdate) / 1000;
-    return diffSeconds < 120; 
-  } catch (err) {
-    return false;
+    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
+  } catch {
+    return { messageId: null };
   }
 }
 
+function saveState(state) {
+  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
+}
+
 function getSystemStats() {
+  // Cálculo de uso de CPU
   const cpus = os.cpus();
   let idle = 0, total = 0;
   cpus.forEach(cpu => {
     for (let type in cpu.times) total += cpu.times[type];
     idle += cpu.times.idle;
   });
+  const cpuUsage = Math.round(100 - (idle / total) * 100);
+
+  // Cálculo de uso de RAM
+  const totalMem = os.totalmem();
+  const freeMem = os.freemem();
+  const ramUsage = Math.round(((totalMem - freeMem) / totalMem) * 100);
+
   return {
-    cpuUsage: Math.round(100 - (idle / total) * 100),
-    ramUsage: Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100)
+    cpuUsage,
+    ramUsage,
+    uptime: Math.round(os.uptime() / 3600), // Uptime en horas
+    platform: os.platform()
   };
 }
 
@@ -49,44 +55,65 @@ function getSystemStats() {
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 async function updateStatus(channel) {
-  const isOnline = checkServerByLog(LOG_FILE_PATH);
-  const { cpuUsage, ramUsage } = getSystemStats();
-  const state = JSON.parse(fs.existsSync(STATE_FILE) ? fs.readFileSync(STATE_FILE) : '{"messageId":null}');
+  const stats = getSystemStats();
+  const state = loadState();
 
+  // Si el bot llega a este punto, es porque el servidor está "UP"
   const embed = new EmbedBuilder()
-    .setTitle(isOnline ? "🟢 Servidor Activo" : "🔴 Servidor Caído")
-    .setColor(isOnline ? 0x00FF00 : 0xFF0000)
+    .setTitle("🟢 Servidor: En Línea")
+    .setColor(0x00FF00)
+    .setDescription("El bot de monitoreo se está ejecutando correctamente en el servidor local.")
     .addFields(
-      { name: "Última actividad", value: isOnline ? "Reciente" : "Hace más de 2 min", inline: true },
-      { name: "Carga CPU", value: `${cpuUsage}%`, inline: true },
-      { name: "Uso RAM", value: `${ramUsage}%`, inline: true }
+      { name: "Carga de CPU", value: `${stats.cpuUsage}%`, inline: true },
+      { name: "Uso de RAM", value: `${stats.ramUsage}%`, inline: true },
+      { name: "Sistema Uptime", value: `${stats.uptime} horas`, inline: true },
+      { name: "SO", value: stats.platform.toUpperCase(), inline: true }
     )
-    .setTimestamp();
+    .setTimestamp()
+    .setFooter({ text: "Actualización automática cada 30s" });
 
   try {
-    let msg;
-    if (state.messageId) {
-      msg = await channel.messages.fetch(state.messageId);
-      await msg.edit({ embeds: [embed] });
+    let messageId = state.messageId;
+    
+    if (messageId) {
+      try {
+        const msg = await channel.messages.fetch(messageId);
+        await msg.edit({ embeds: [embed] });
+      } catch {
+        // Si el mensaje fue borrado, enviamos uno nuevo
+        const msg = await channel.send({ embeds: [embed] });
+        messageId = msg.id;
+      }
     } else {
-      msg = await channel.send({ embeds: [embed] });
-      state.messageId = msg.id;
-      fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+      const msg = await channel.send({ embeds: [embed] });
+      messageId = msg.id;
     }
-  } catch {
-    const msg = await channel.send({ embeds: [embed] });
-    state.messageId = msg.id;
-    fs.writeFileSync(STATE_FILE, JSON.stringify(state));
+
+    saveState({ messageId });
+  } catch (error) {
+    console.error("Error al actualizar Discord:", error.message);
   }
 }
 
-/* ================= START ================= */
+/* ================= INICIO ================= */
 
 client.once("ready", async () => {
-  console.log(`🤖 Bot listo. Monitoreando archivo: ${LOG_FILE_PATH}`);
-  const channel = await client.channels.fetch(CHANNEL_ID);
+  console.log(`✅ Monitoreo global iniciado como: ${client.user.tag}`);
   
-  setInterval(() => updateStatus(channel), Number(CHECK_INTERVAL) || 30000);
+  try {
+    const channel = await client.channels.fetch(CHANNEL_ID);
+    
+    // Primer reporte
+    updateStatus(channel);
+
+    // Bucle infinito
+    setInterval(() => {
+      updateStatus(channel);
+    }, Number(CHECK_INTERVAL) || 30000);
+
+  } catch (err) {
+    console.error("No se pudo acceder al canal de Discord:", err.message);
+  }
 });
 
 client.login(DISCORD_TOKEN);
