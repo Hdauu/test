@@ -111,40 +111,29 @@ async function updateStatus(isShuttingDown = false) {
         }
 
         const embed = new EmbedBuilder()
-            .setTitle(`${statusEmoji} Estado del Servidor Hytale`)
-            .setDescription(description)
             .setColor(color)
             .addFields(
                 { 
-                    name: "📊 Estado", 
-                    value: `**${statusText}**`, 
+                    name: "Estado", 
+                    value: `${statusEmoji} **${statusText}**`, 
                     inline: false 
                 },
                 { 
-                    name: "🖥️ CPU", 
-                    value: `${cpuUsage}%${cpuUsage > Number(CPU_WARN) ? ' ⚠️' : ''}`, 
+                    name: "CPU", 
+                    value: `${cpuUsage}%`, 
                     inline: true 
                 },
                 { 
-                    name: "💾 RAM", 
-                    value: `${ramUsage}% (${freeRam}GB libre de ${totalRam}GB)${ramUsage > Number(RAM_WARN) ? ' ⚠️' : ''}`, 
+                    name: "RAM", 
+                    value: `${ramUsage}%`, 
                     inline: true 
                 },
                 { 
-                    name: "🎮 Proceso Hytale", 
-                    value: serverAlive ? "✅ Activo" : "❌ Inactivo", 
-                    inline: true 
-                },
-                { 
-                    name: "⏱️ Última Actualización", 
+                    name: "Última actualización", 
                     value: `<t:${Math.floor(Date.now() / 1000)}:R>`, 
                     inline: false 
                 }
-            )
-            .setFooter({ 
-                text: `Intervalo de verificación: ${Number(CHECK_INTERVAL) / 1000}s | Ubuntu Server 24` 
-            })
-            .setTimestamp();
+            );
 
         let msg;
         if (state.messageId) {
@@ -216,7 +205,6 @@ client.once("ready", async () => {
     console.log(`🔄 Intervalo: ${Number(CHECK_INTERVAL) / 1000} segundos\n`);
     
     // Ejecución inicial e intervalo
-    
     updateStatus();
     setInterval(() => updateStatus(), Number(CHECK_INTERVAL));
 });
