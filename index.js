@@ -12,7 +12,7 @@ const {
 
 const STATE_FILE = "./state.json";
 
-/* ================= FUNCIONES DE APOYO ================= */
+/* ================= ESTADO Y RECURSOS ================= */
 
 function loadState() {
   if (!fs.existsSync(STATE_FILE)) return { messageId: null };
@@ -28,7 +28,6 @@ function saveState(state) {
 }
 
 function getSystemStats() {
-  // Cálculo de uso de CPU
   const cpus = os.cpus();
   let idle = 0, total = 0;
   cpus.forEach(cpu => {
@@ -36,18 +35,9 @@ function getSystemStats() {
     idle += cpu.times.idle;
   });
   const cpuUsage = Math.round(100 - (idle / total) * 100);
-
-  // Cálculo de uso de RAM
-  const totalMem = os.totalmem();
-  const freeMem = os.freemem();
-  const ramUsage = Math.round(((totalMem - freeMem) / totalMem) * 100);
-
-  return {
-    cpuUsage,
-    ramUsage,
-    uptime: Math.round(os.uptime() / 3600), // Uptime en horas
-    platform: os.platform()
-  };
+  const ramUsage = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
+  
+  return { cpuUsage, ramUsage, uptime: Math.round(os.uptime() / 3600) };
 }
 
 /* ================= BOT DE DISCORD ================= */
@@ -58,61 +48,61 @@ async function updateStatus(channel) {
   const stats = getSystemStats();
   const state = loadState();
 
-  // Si el bot llega a este punto, es porque el servidor está "UP"
+  // Si esta función se ejecuta, el servidor se considera ONLINE
   const embed = new EmbedBuilder()
-    .setTitle("🟢 Servidor: En Línea")
+    .setTitle("🟢 Servidor: Funcionando")
     .setColor(0x00FF00)
-    .setDescription("El bot de monitoreo se está ejecutando correctamente en el servidor local.")
+    .setDescription("El sistema de monitoreo local está activo.")
     .addFields(
-      { name: "Carga de CPU", value: `${stats.cpuUsage}%`, inline: true },
-      { name: "Uso de RAM", value: `${stats.ramUsage}%`, inline: true },
-      { name: "Sistema Uptime", value: `${stats.uptime} horas`, inline: true },
-      { name: "SO", value: stats.platform.toUpperCase(), inline: true }
+      { name: "CPU", value: `${stats.cpuUsage}%`, inline: true },
+      { name: "RAM", value: `${stats.ramUsage}%`, inline: true },
+      { name: "Uptime", value: `${stats.uptime} Horas`, inline: true }
     )
     .setTimestamp()
-    .setFooter({ text: "Actualización automática cada 30s" });
+    .setFooter({ text: "Actualización automática" });
 
   try {
     let messageId = state.messageId;
-    
+    let msg;
+
     if (messageId) {
       try {
-        const msg = await channel.messages.fetch(messageId);
+        msg = await channel.messages.fetch(messageId);
         await msg.edit({ embeds: [embed] });
       } catch {
-        // Si el mensaje fue borrado, enviamos uno nuevo
-        const msg = await channel.send({ embeds: [embed] });
+        msg = await channel.send({ embeds: [embed] });
         messageId = msg.id;
       }
     } else {
-      const msg = await channel.send({ embeds: [embed] });
+      msg = await channel.send({ embeds: [embed] });
       messageId = msg.id;
     }
 
     saveState({ messageId });
   } catch (error) {
-    console.error("Error al actualizar Discord:", error.message);
+    console.error("Error al actualizar el canal:", error.message);
   }
 }
 
 /* ================= INICIO ================= */
 
-client.once("ready", async () => {
+// Usamos clientReady para evitar el Warning de la consola
+client.once("clientReady", async () => {
   console.log(`✅ Monitoreo global iniciado como: ${client.user.tag}`);
   
   try {
     const channel = await client.channels.fetch(CHANNEL_ID);
     
-    // Primer reporte
-    updateStatus(channel);
+    // Ejecutar el primer chequeo
+    await updateStatus(channel);
 
-    // Bucle infinito
+    // Intervalo de actualización
     setInterval(() => {
-      updateStatus(channel);
+      updateStatus(channel).catch(console.error);
     }, Number(CHECK_INTERVAL) || 30000);
 
   } catch (err) {
-    console.error("No se pudo acceder al canal de Discord:", err.message);
+    console.error("Error al acceder al canal de Discord:", err.message);
   }
 });
 
