@@ -36,10 +36,11 @@ function getSystemStats() {
   });
   const cpuUsage = Math.round(100 - (idle / total) * 100);
   const ramUsage = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
-  const uptimeHours = Math.floor(os.uptime() / 3600);
-  const uptimeMins = Math.floor((os.uptime() % 3600) / 60);
+  
+  const uptimeH = Math.floor(os.uptime() / 3600);
+  const uptimeM = Math.floor((os.uptime() % 3600) / 60);
 
-  return { cpuUsage, ramUsage, uptime: `${uptimeHours}h ${uptimeMins}m` };
+  return { cpuUsage, ramUsage, uptime: `${uptimeH}h ${uptimeM}m` };
 }
 
 /* ================= BOT DE DISCORD ================= */
@@ -51,20 +52,21 @@ async function updateStatus(channel) {
   const stats = getSystemStats();
   const state = loadState();
 
-  // Al no depender de checkPort, el bot siempre reportará ONLINE si el proceso corre
+  // ELIMINADA TODA LÓGICA DE PUERTOS. 
+  // Si el bot llega aquí, el estado es ONLINE por defecto.
   const embed = new EmbedBuilder()
-    .setTitle("🟢 Servidor: Funcionando Correctamente")
-    .setColor(0x00FF00) // Verde
-    .setDescription("El sistema de monitoreo local está activo y reportando recursos.")
+    .setTitle("🟢 Servidor: Funcionando")
+    .setColor(0x00FF00)
+    .setDescription("El sistema de monitoreo está reportando actividad directamente desde el servidor local.")
     .addFields(
-      { name: "Estado", value: "En Línea", inline: true },
-      { name: "Uptime Máquina", value: stats.uptime, inline: true },
-      { name: "\u200B", value: "\u200B", inline: true }, // Espaciador
-      { name: "Uso de CPU", value: `${stats.cpuUsage}%`, inline: true },
+      { name: "Estado", value: "✅ En Línea", inline: true },
+      { name: "Uptime", value: stats.uptime, inline: true },
+      { name: "\u200B", value: "\u200B", inline: true },
+      { name: "Carga CPU", value: `${stats.cpuUsage}%`, inline: true },
       { name: "Uso de RAM", value: `${stats.ramUsage}%`, inline: true }
     )
     .setTimestamp()
-    .setFooter({ text: "Actualización automática del sistema" });
+    .setFooter({ text: "Actualización en tiempo real" });
 
   try {
     let messageId = state.messageId;
@@ -74,7 +76,6 @@ async function updateStatus(channel) {
         const msg = await channel.messages.fetch(messageId);
         await msg.edit({ embeds: [embed] });
       } catch (e) {
-        // Si el mensaje fue borrado, enviamos uno nuevo
         const msg = await channel.send({ embeds: [embed] });
         messageId = msg.id;
       }
@@ -84,31 +85,31 @@ async function updateStatus(channel) {
     }
 
     saveState({ messageId });
-    console.log(`[${new Date().toLocaleTimeString()}] Panel actualizado en Discord.`);
+    console.log(`[${new Date().toLocaleTimeString()}] Panel actualizado correctamente.`);
   } catch (error) {
-    console.error("Error al intentar actualizar Discord:", error.message);
+    console.error("Error al actualizar Discord:", error.message);
   }
 }
 
-/* ================= START ================= */
+/* ================= INICIO ================= */
 
-// Cambiado a clientReady para eliminar el DeprecationWarning
+// Cambiado a 'clientReady' para eliminar el DeprecationWarning de tu consola
 client.once("clientReady", async () => {
   console.log(`✅ Bot conectado como ${client.user.tag}`);
 
   try {
     const channel = await client.channels.fetch(CHANNEL_ID);
     
-    // Primer chequeo inmediato
+    // Ejecución inicial
     await updateStatus(channel);
 
-    // Intervalo de actualización (por defecto 30 segundos)
+    // Bucle de actualización (30 segundos por defecto)
     setInterval(() => {
       updateStatus(channel).catch(console.error);
     }, Number(CHECK_INTERVAL) || 30000);
 
   } catch (error) {
-    console.error("Error crítico: No se pudo encontrar el canal.", error.message);
+    console.error("Error crítico: No se pudo conectar al canal.", error.message);
   }
 });
 
