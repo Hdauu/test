@@ -2,14 +2,12 @@ import "dotenv/config";
 import fs from "fs";
 import net from "net";
 import os from "os";
-import { Client, GatewayIntentBits } from "discord.js";
+import { Client, GatewayIntentBits, EmbedBuilder } from "discord.js";
 
-/* ================= CONFIG ================= */
-
+/* ================= CONFIGURACIÓN ================= */
 const {
   DISCORD_TOKEN,
   CHANNEL_ID,
-  SERVER_HOST,
   SERVER_PORT,
   CPU_WARN,
   RAM_WARN,
@@ -17,16 +15,14 @@ const {
 } = process.env;
 
 const STATE_FILE = "./state.json";
+const SERVER_HOST = "127.0.0.1"; // Al estar en la misma máquina, usamos localhost
 
-/* ================= STATE ================= */
-
+/* ================= GESTIÓN DE ESTADO ================= */
 function loadState() {
-  if (!fs.existsSync(STATE_FILE)) {
-    return { messageId: null, lastStatus: null };
-  }
+  if (!fs.existsSync(STATE_FILE)) return { messageId: null, lastStatus: null };
   try {
     return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch (err) {
+  } catch {
     return { messageId: null, lastStatus: null };
   }
 }
@@ -35,16 +31,12 @@ function saveState(state) {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-/* ================= CHECKS ================= */
+/* ================= LÓGICA DE MONITOREO ================= */
 
-/**
- * Intenta abrir una conexión TCP al host y puerto especificados.
- * Se aumenta el timeout y se añade limpieza de socket.
- */
-function checkPort(host, port, timeout = 5000) {
+// Verifica si el puerto está abierto
+function checkPort(port, timeout = 5000) {
   return new Promise((resolve) => {
     const socket = new net.Socket();
-
     socket.setTimeout(timeout);
 
     socket
@@ -54,135 +46,108 @@ function checkPort(host, port, timeout = 5000) {
       })
       .once("timeout", () => {
         socket.destroy();
-        console.log(`[LOG] Timeout intentando conectar a ${host}:${port}`);
         resolve(false);
       })
-      .once("error", (err) => {
+      .once("error", () => {
         socket.destroy();
-        console.log(`[LOG] Error de conexión en ${host}:${port} -> ${err.message}`);
         resolve(false);
       })
-      .connect(Number(port), host);
+      .connect(Number(port), SERVER_HOST);
   });
 }
 
-function getCpuUsage() {
+// Obtiene estadísticas del sistema
+function getSystemStats() {
   const cpus = os.cpus();
-  let idle = 0;
-  let total = 0;
-
-  for (const cpu of cpus) {
-    for (const type in cpu.times) total += cpu.times[type];
+  let idle = 0, total = 0;
+  cpus.forEach(cpu => {
+    for (let type in cpu.times) total += cpu.times[type];
     idle += cpu.times.idle;
-  }
-
-  return Math.round(100 - (idle / total) * 100);
+  });
+  const cpuUsage = Math.round(100 - (idle / total) * 100);
+  const ramUsage = Math.round(((os.totalmem() - os.freemem()) / os.totalmem()) * 100);
+  return { cpuUsage, ramUsage };
 }
 
-function getRamUsage() {
-  const total = os.totalmem();
-  const free = os.freemem();
-  return Math.round(((total - free) / total) * 100);
-}
+/* ================= BOT DE DISCORD ================= */
 
-/* ================= DISCORD ================= */
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-const client = new Client({
-  intents: [GatewayIntentBits.Guilds],
-});
-
-async function updateStatusMessage(channel, text, state) {
-  if (state.messageId) {
-    try {
-      const msg = await channel.messages.fetch(state.messageId);
-      await msg.edit(text);
-      return state.messageId;
-    } catch (e) {
-      console.log("[LOG] No se pudo editar el mensaje anterior, enviando uno nuevo.");
-    }
-  }
-
-  const msg = await channel.send(text);
-  return msg.id;
-}
-
-async function sendPing(channel, text) {
-  try {
-    const msg = await channel.send({
-      content: `@everyone ⚠️ **Alerta de Estado:** ${text}`,
-      allowedMentions: { parse: ["everyone"] },
-    });
-
-    // Borrar el ping luego de 15s para no ensuciar el canal
-    setTimeout(() => msg.delete().catch(() => {}), 15000);
-  } catch (err) {
-    console.error("[ERROR] No se pudo enviar el ping:", err.message);
-  }
-}
-
-/* ================= STATUS LOGIC ================= */
-
-async function checkStatus(channel) {
+async function updateStatus(channel) {
   const state = loadState();
-  const online = await checkPort(SERVER_HOST, SERVER_PORT);
+  const isOnline = await checkPort(SERVER_PORT);
+  const { cpuUsage, ramUsage } = getSystemStats();
 
-  let status;
-  let text;
-
-  if (!online) {
-    status = "DOWN";
-    text = "🔴 **Estado:** Actualmente Caído o Inalcanzable";
-  } else {
-    const cpu = getCpuUsage();
-    const ram = getRamUsage();
-
-    if (cpu >= Number(CPU_WARN) || ram >= Number(RAM_WARN)) {
+  let status = "DOWN", color = 0xff0000, emoji = "🔴";
+  
+  if (isOnline) {
+    if (cpuUsage >= Number(CPU_WARN) || ramUsage >= Number(RAM_WARN)) {
       status = "WARN";
-      text = `🟡 **Estado:** Problemas de rendimiento (CPU: ${cpu}% | RAM: ${ram}%)`;
+      color = 0xffff00; // Amarillo
+      emoji = "🟡";
     } else {
       status = "OK";
-      text = `🟢 **Estado:** Funcionando correctamente (CPU: ${cpu}% | RAM: ${ram}%)`;
+      color = 0x00ff00; // Verde
+      emoji = "🟢";
     }
   }
 
-  console.log(`[CHECK] ${new Date().toLocaleTimeString()} | ${status}`);
+  // Crear el Embed (la tarjeta visual)
+  const embed = new EmbedBuilder()
+    .setTitle(`${emoji} Estado del Servidor`)
+    .setColor(color)
+    .addFields(
+      { name: "Estatus", value: status === "OK" ? "En línea" : status === "WARN" ? "Rendimiento Crítico" : "Desconectado", inline: true },
+      { name: "CPU", value: `${cpuUsage}%`, inline: true },
+      { name: "RAM", value: `${ramUsage}%`, inline: true }
+    )
+    .setTimestamp()
+    .setFooter({ text: `Puerto monitoreado: ${SERVER_PORT}` });
 
-  // Actualizar el mensaje principal
-  const messageId = await updateStatusMessage(channel, text, state);
+  let messageId = state.messageId;
 
-  // Enviar ping si el estado cambió a algo crítico (DOWN o WARN)
-  if (status !== state.lastStatus) {
-    if (status === "DOWN" || status === "WARN") {
-      await sendPing(channel, text);
+  try {
+    if (messageId) {
+      const msg = await channel.messages.fetch(messageId);
+      await msg.edit({ content: null, embeds: [embed] });
+    } else {
+      const msg = await channel.send({ embeds: [embed] });
+      messageId = msg.id;
     }
+  } catch (err) {
+    // Si el mensaje no existe o fue borrado, enviamos uno nuevo
+    const msg = await channel.send({ embeds: [embed] });
+    messageId = msg.id;
   }
 
-  saveState({
-    messageId,
-    lastStatus: status,
-  });
+  // Notificación extra (ping) solo si el estado cambió a algo malo
+  if (status !== state.lastStatus && (status === "DOWN" || status === "WARN")) {
+    const alert = await channel.send(`⚠️ **Atención:** El servidor ha cambiado a estado: **${status}** @everyone`);
+    setTimeout(() => alert.delete().catch(() => {}), 15000); // Borrar alerta en 15s
+  }
+
+  saveState({ messageId, lastStatus: status });
+  console.log(`[${new Date().toLocaleTimeString()}] Chequeo finalizado: ${status}`);
 }
 
-/* ================= START ================= */
+/* ================= INICIO ================= */
 
-// El evento correcto es 'ready'
 client.once("ready", async () => {
-  console.log(`🤖 Bot conectado como ${client.user.tag}`);
-
+  console.log(`✅ Bot activo: ${client.user.tag}`);
+  
   try {
     const channel = await client.channels.fetch(CHANNEL_ID);
     
-    // Ejecutar chequeo inicial
-    await checkStatus(channel);
+    // Ejecutar inmediatamente al prender
+    await updateStatus(channel);
 
-    // Configurar intervalo
-    const interval = Number(CHECK_INTERVAL) || 30000;
+    // Ciclo de repetición
     setInterval(() => {
-      checkStatus(channel).catch(console.error);
-    }, interval);
+      updateStatus(channel).catch(console.error);
+    }, Number(CHECK_INTERVAL) || 60000);
 
   } catch (error) {
-    console.error("[CRITICAL ERROR] Error al obtener el canal:", error.message);
+    console.error("Error crítico al obtener el canal:", error.message);
   }
 });
 
